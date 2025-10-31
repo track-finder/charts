@@ -14,7 +14,7 @@ app.use(cors({origin:["https://trackfinder.co.uk","https://www.trackfinder.co.uk
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({extended:true}));
 const upload = multer({storage:multer.memoryStorage()});
-const supabase=createClient(process.env.SUPABASE_URL,process.env.SUPABASE_SERVICE_ROLE_KEY);
+const supabase=createClient(process.env.https://jonlbohqkvajrpwkhmtq.supabase.co,process.env.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Impvbmxib2hxa3ZhanJwd2tobXRxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE4NzA1MjksImV4cCI6MjA3NzQ0NjUyOX0.G2JkcqzjuSQHFMwLH1NRLI_RGwa47kaezX_LKJFjIJc);
 const DEFAULT_LOGO="https://www.trackfinder.co.uk/assets/trackfinder-default-logo.png";
 app.get("/",(r,s)=>s.send("✅ Track Finder Charts Backend Running"));
 app.get("/health",(r,s)=>s.json({ok:true}));
