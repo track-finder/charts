@@ -1,6 +1,7 @@
-// === Track Finder Charts Backend (Full Build v6.0) ===
+// === Track Finder Charts Backend (server.js) ===
+// Version: 5.0
 // Author: Jonathan Russell
-// Purpose: Handles artist uploads, chart voting, and winner logic
+// Purpose: Handle artist uploads, voting, and monthly chart logic.
 
 import express from "express";
 import cors from "cors";
@@ -9,251 +10,225 @@ import multer from "multer";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import { Resend } from "resend";
-import fs from "fs";
-import ffmpeg from "fluent-ffmpeg";
-import ffmpegPath from "ffmpeg-static";
 
 dotenv.config();
 const app = express();
-const PORT = process.env.PORT || 10000;
-
-ffmpeg.setFfmpegPath(ffmpegPath);
+const PORT = process.env.PORT || 3000;
 
 // === Middleware ===
-app.use(
-  cors({
-    origin: ["https://www.trackfinder.co.uk", "https://trackfinder.co.uk"],
-    credentials: true,
-  })
-);
+app.use(cors({
+  origin: ["https://www.trackfinder.co.uk", "https://trackfinder.co.uk"],
+  credentials: true,
+}));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// === Supabase & Resend Setup ===
+// === Supabase & Resend setup ===
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 const resend = new Resend(process.env.RESEND_API);
-const FROM_EMAIL = process.env.FROM_EMAIL || "admin@trackfinder.co.uk";
+const FROM_EMAIL = "admin@trackfinder.co.uk";
 
-// === Multer ===
-const upload = multer({ dest: "uploads/" });
+// === File upload setup ===
+const upload = multer({ storage: multer.memoryStorage() });
 
-// === Health Check ===
+// === Health check ===
 app.get("/health", (req, res) => res.json({ ok: true, status: "running" }));
 
-// === Verify Upload Token ===
-async function verifyToken(email, token) {
-  const { data, error } = await supabase
-    .from("upload_tokens")
-    .select("*")
-    .eq("email", email)
-    .eq("token", token)
-    .eq("used", false)
-    .maybeSingle();
-
-  if (error) throw error;
-  return data;
-}
-
-// === Send Email Helper ===
+// === Helper: send email ===
 async function sendEmail(to, subject, html) {
   try {
     await resend.emails.send({ from: FROM_EMAIL, to, subject, html });
   } catch (err) {
-    console.error("Email send failed:", err.message);
+    console.error("Email send error:", err.message);
   }
 }
 
-// === Upload Track ===
-app.post(
-  "/api/upload-track",
-  upload.fields([
-    { name: "file", maxCount: 1 },
-    { name: "artwork", maxCount: 1 },
-  ]),
-  async (req, res) => {
-    try {
-      const { artist, title, genre, email, token, allow_download } = req.body;
-
-      if (!artist || !title || !genre || !email || !token || !req.files.file)
-        return res
-          .status(400)
-          .json({ success: false, error: "Missing required fields." });
-
-      const tokenData = await verifyToken(email, token);
-      if (!tokenData)
-        return res
-          .status(403)
-          .json({ success: false, error: "Invalid or used token." });
-
-      const trackFile = req.files.file[0];
-      const previewPath = `uploads/preview_${Date.now()}.mp3`;
-
-      // === Create 1:00 → 2:30 preview ===
-      await new Promise((resolve, reject) => {
-        ffmpeg(trackFile.path)
-          .setStartTime("00:01:00")
-          .setDuration("00:01:30")
-          .output(previewPath)
-          .on("end", resolve)
-          .on("error", reject)
-          .run();
-      });
-
-      // === Upload Full + Preview to Supabase Storage ===
-      const [fullUpload, previewUpload] = await Promise.all([
-        supabase.storage
-          .from("tracks")
-          .upload(
-            `full/${Date.now()}_${trackFile.originalname}`,
-            fs.readFileSync(trackFile.path),
-            { contentType: trackFile.mimetype }
-          ),
-        supabase.storage
-          .from("tracks")
-          .upload(
-            `previews/preview_${Date.now()}.mp3`,
-            fs.readFileSync(previewPath),
-            { contentType: "audio/mpeg" }
-          ),
-      ]);
-
-      // === Upload Artwork or Use Default ===
-      let artworkUrl =
-        "https://www.trackfinder.co.uk/s/track-finder-logo.png";
-      if (req.files.artwork) {
-        const art = req.files.artwork[0];
-        const artUpload = await supabase.storage
-          .from("artworks")
-          .upload(
-            `art_${Date.now()}_${art.originalname}`,
-            fs.readFileSync(art.path),
-            { contentType: art.mimetype }
-          );
-        if (!artUpload.error)
-          artworkUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/${artUpload.data.path}`;
-      }
-
-      // === Save in Database ===
-      const { error: insertErr } = await supabase.from("tracks").insert([
-        {
-          artist,
-          title,
-          genre,
-          email,
-          allow_download: allow_download === "true",
-          file_url: `${process.env.SUPABASE_URL}/storage/v1/object/public/${fullUpload.data.path}`,
-          preview_url: `${process.env.SUPABASE_URL}/storage/v1/object/public/${previewUpload.data.path}`,
-          artwork_url: artworkUrl,
-          created_at: new Date().toISOString(),
-          total_votes: 0,
-          average_rating: 0,
-          play_count: 0,
-        },
-      ]);
-
-      if (insertErr) throw insertErr;
-
-      await supabase
-        .from("upload_tokens")
-        .update({ used: true })
-        .eq("id", tokenData.id);
-
-      fs.unlinkSync(trackFile.path);
-      fs.unlinkSync(previewPath);
-      if (req.files.artwork) fs.unlinkSync(req.files.artwork[0].path);
-
-      await sendEmail(
-        email,
-        "🎵 Track Uploaded Successfully!",
-        `<p>Hi ${artist},</p>
-         <p>Your track <b>${title}</b> has been uploaded to Track Finder Charts.</p>
-         <p>Preview: 1:00 – 2:30 | Genre: ${genre}</p>
-         <p>Thank you for contributing!</p>`
-      );
-
-      res.json({ success: true, message: "Track uploaded successfully." });
-    } catch (err) {
-      console.error("Upload error:", err.message);
-      res.status(500).json({ success: false, error: "Upload failed." });
-    }
-  }
-);
-
-// === Get Charts ===
-app.get("/api/charts", async (req, res) => {
+// === Check Email / Token ===
+app.post("/api/check-email", async (req, res) => {
   try {
-    const genre = req.query.genre || "all";
-    const query = supabase
-      .from("tracks")
-      .select("*")
-      .order("average_rating", { ascending: false });
+    const { email } = req.body;
+    if (!email)
+      return res.status(400).json({ success: false, message: "Email required" });
 
-    if (genre !== "all") query.eq("genre", genre);
-    const { data, error } = await query;
+    const { data, error } = await supabase
+      .from("tokens")
+      .select("*")
+      .eq("user_email", email)
+      .eq("used", false)
+      .maybeSingle();
 
     if (error) throw error;
-    res.json({ tracks: data });
+
+    if (!data) {
+      return res.status(403).json({ success: false, message: "Invalid or used token" });
+    }
+
+    res.json({ success: true, message: "Email verified" });
   } catch (err) {
-    console.error("Charts fetch error:", err.message);
-    res.status(500).json({ error: "Failed to fetch charts." });
+    console.error("Email verification error:", err.message);
+    res.status(500).json({ success: false, message: "Server error checking email" });
   }
 });
 
-// === Voting ===
+// === Upload Track ===
+app.post("/api/upload-track", upload.single("file"), async (req, res) => {
+  try {
+    const { title, artist, genre, email, token, allow_download } = req.body;
+    const file = req.file;
+
+    if (!title || !artist || !file || !email || !token)
+      return res.status(400).json({ success: false, message: "Missing required fields" });
+
+    // Verify token
+    const { data: tokenData, error: tokenError } = await supabase
+      .from("tokens")
+      .select("*")
+      .eq("user_email", email)
+      .eq("token", token)
+      .eq("used", false)
+      .maybeSingle();
+
+    if (tokenError) throw tokenError;
+    if (!tokenData)
+      return res.status(403).json({ success: false, message: "Invalid or used token" });
+
+    // Upload audio file
+    const { data: uploadData, error: uploadError } = await supabase.storage
+      .from("tracks")
+      .upload(`uploads/${Date.now()}_${file.originalname}`, file.buffer, {
+        contentType: file.mimetype,
+        upsert: true,
+      });
+
+    if (uploadError) throw uploadError;
+
+    const trackUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/${uploadData.path}`;
+
+    // Save metadata
+    const { error: insertError } = await supabase.from("tracks").insert([
+      {
+        title,
+        artist,
+        genre,
+        uploader_email: email,
+        file_path: trackUrl,
+        allow_download: allow_download === "true",
+        play_count: 0,
+        average_rating: 0,
+        total_votes: 0,
+        created_at: new Date().toISOString(),
+      },
+    ]);
+
+    if (insertError) throw insertError;
+
+    // Mark token as used
+    await supabase
+      .from("tokens")
+      .update({ used: true, used_at: new Date().toISOString() })
+      .eq("id", tokenData.id);
+
+    // Send confirmation email
+    await sendEmail(
+      email,
+      "🎶 Your Track Has Been Uploaded!",
+      `<p>Hi ${artist},</p>
+      <p>Your track <b>${title}</b> has been successfully uploaded to the Track Finder charts.</p>
+      <p>Thank you for contributing to the underground community!</p>
+      <br><p>— Track Finder Team</p>`
+    );
+
+    res.json({ success: true, message: "Track uploaded successfully!" });
+  } catch (err) {
+    console.error("Upload error:", err.message);
+    res.status(500).json({ success: false, message: "Upload failed" });
+  }
+});
+
+// === Get Tracks ===
+app.get("/api/tracks", async (req, res) => {
+  try {
+    const genre = req.query.genre;
+    let query = supabase.from("tracks").select("*").order("created_at", { ascending: false });
+    if (genre && genre !== "all") query = query.eq("genre", genre);
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    res.json({ success: true, tracks: data });
+  } catch (err) {
+    console.error("Fetch tracks error:", err.message);
+    res.status(500).json({ success: false, message: "Failed to fetch tracks" });
+  }
+});
+
+// === Vote ===
 app.post("/api/vote", async (req, res) => {
   try {
     const { track_id, score } = req.body;
-    if (!track_id || !score)
-      return res.status(400).json({ error: "Missing fields" });
+    if (!track_id || !score) return res.status(400).json({ success: false, message: "Missing fields" });
 
-    const { data, error } = await supabase
+    const { data: track, error: fetchError } = await supabase
       .from("tracks")
-      .select("total_votes, average_rating")
+      .select("average_rating, total_votes")
       .eq("id", track_id)
-      .single();
+      .maybeSingle();
 
-    if (error || !data) throw error;
+    if (fetchError) throw fetchError;
+    if (!track) return res.status(404).json({ success: false, message: "Track not found" });
 
-    const total = (data.total_votes || 0) + 1;
-    const avg =
-      ((data.average_rating || 0) * (total - 1) + score) / total;
+    const newTotalVotes = (track.total_votes || 0) + 1;
+    const newAvgRating =
+      ((track.average_rating || 0) * (track.total_votes || 0) + Number(score)) / newTotalVotes;
 
-    await supabase
+    const { error: updateError } = await supabase
       .from("tracks")
-      .update({ total_votes: total, average_rating: avg })
+      .update({ average_rating: newAvgRating, total_votes: newTotalVotes })
       .eq("id", track_id);
 
+    if (updateError) throw updateError;
     res.json({ success: true });
   } catch (err) {
     console.error("Vote error:", err.message);
-    res.status(500).json({ error: "Failed to vote." });
+    res.status(500).json({ success: false, message: "Failed to vote" });
   }
 });
 
-// === Play Counter ===
-app.post("/api/track-play/:id", async (req, res) => {
+// === Finalize Winners (cron monthly) ===
+app.post("/api/finalize-winners", async (req, res) => {
   try {
-    const { id } = req.params;
-    const { data, error } = await supabase
+    const adminToken = req.headers["x-admin-token"];
+    if (adminToken !== process.env.ADMIN_TOKEN)
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+
+    const { data: tracks, error } = await supabase
       .from("tracks")
-      .select("play_count")
-      .eq("id", id)
-      .single();
+      .select("*")
+      .order("average_rating", { ascending: false })
+      .limit(10);
+
     if (error) throw error;
 
-    const newCount = (data.play_count || 0) + 1;
-    await supabase
-      .from("tracks")
-      .update({ play_count: newCount })
-      .eq("id", id);
+    for (const t of tracks) {
+      await supabase.from("winners").insert([
+        {
+          track_id: t.id,
+          title: t.title,
+          artist: t.artist,
+          average_rating: t.average_rating,
+          total_votes: t.total_votes,
+          created_at: new Date().toISOString(),
+        },
+      ]);
+    }
 
-    res.json({ success: true, play_count: newCount });
+    res.json({ success: true, message: "Winners finalized" });
   } catch (err) {
-    console.error("Play counter error:", err.message);
-    res.status(500).json({ error: "Failed to update play count" });
+    console.error("Finalize winners error:", err.message);
+    res.status(500).json({ success: false, message: "Failed to finalize winners" });
   }
 });
 
