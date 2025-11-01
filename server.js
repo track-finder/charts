@@ -1,45 +1,52 @@
+// === Track Finder Charts Backend ===
+// Complete working version with upload_tokens & dual file upload (track + artwork)
+
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
-import { createClient } from "@supabase/supabase-js";
-import dotenv from "dotenv";
 import multer from "multer";
-import fs from "fs";
+import dotenv from "dotenv";
+import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// === Supabase setup ===
+// === Middleware ===
+app.use(cors());
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+
+// === Supabase ===
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// === Middleware ===
-app.use(cors({
-  origin: ["https://trackfinder.co.uk", "https://www.trackfinder.co.uk"],
-  credentials: true
-}));
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
-
-// === Multer setup for uploads ===
-const upload = multer({ dest: "uploads/" });
+// === Multer setup ===
+const storage = multer.memoryStorage();
+const upload = multer({
+  storage,
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB limit
+}).fields([
+  { name: "file", maxCount: 1 },
+  { name: "artwork", maxCount: 1 },
+]);
 
 // === Health check ===
 app.get("/", (req, res) => {
-  res.send("✅ Track Finder Charts backend running on port " + PORT);
+  res.send("✅ Track Finder Charts backend is live");
 });
 
-// === Verify Upload Token ===
-app.post("/api/verify-token", async (req, res) => {
+// === Upload Track Route ===
+app.post("/api/upload-track", upload, async (req, res) => {
   try {
-    const { email, token } = req.body;
-    if (!email || !token)
-      return res.status(400).json({ success: false, error: "Missing email or token" });
+    const { email, token, artist, title, genre, allow_download } = req.body;
 
-    const { data, error } = await supabase
+    console.log("Incoming upload:", { email, token, artist, title, genre });
+
+    // Validate token
+    const { data: tokenRow, error: tokenError } = await supabase
       .from("upload_tokens")
       .select("*")
       .eq("email", email)
@@ -47,77 +54,77 @@ app.post("/api/verify-token", async (req, res) => {
       .eq("used", false)
       .maybeSingle();
 
-    if (error) throw error;
-    if (!data) return res.status(401).json({ success: false, error: "Invalid or already used token" });
+    if (tokenError || !tokenRow) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid or already used token." });
+    }
 
-    res.json({ success: true, message: "Token verified" });
-  } catch (err) {
-    console.error("Token verification error:", err.message);
-    res.status(500).json({ success: false, error: "Server error verifying token" });
-  }
-});
+    const trackFile = req.files?.file?.[0];
+    const artworkFile = req.files?.artwork?.[0];
 
-// === Upload Track ===
-app.post("/api/upload-track", upload.single("audio"), async (req, res) => {
-  try {
-    const { artist, title, genre, email, token, allowDownload } = req.body;
-    if (!req.file || !artist || !title || !genre || !email || !token)
-      return res.status(400).json({ success: false, error: "Missing required fields" });
+    if (!trackFile) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Track file missing." });
+    }
 
-    // Verify upload token
-    const { data: tokenRow, error: tokenErr } = await supabase
-      .from("upload_tokens")
-      .select("*")
-      .eq("email", email)
-      .eq("token", token)
-      .eq("used", false)
-      .maybeSingle();
-
-    if (tokenErr) throw tokenErr;
-    if (!tokenRow) return res.status(401).json({ success: false, error: "Invalid or used token" });
-
-    // Upload file to Supabase storage
-    const audioBuffer = fs.readFileSync(req.file.path);
-    const fileName = `${Date.now()}_${req.file.originalname}`;
-
-    const { data: storageData, error: uploadErr } = await supabase.storage
-      .from("track_uploads")
-      .upload(fileName, audioBuffer, {
-        contentType: req.file.mimetype,
-        upsert: false,
+    // === Upload track file ===
+    const trackName = `${Date.now()}_${trackFile.originalname}`;
+    const { error: trackErr } = await supabase.storage
+      .from("tracks")
+      .upload(trackName, trackFile.buffer, {
+        contentType: trackFile.mimetype,
       });
 
-    fs.unlinkSync(req.file.path); // Clean up local file
-    if (uploadErr) throw uploadErr;
+    if (trackErr) throw trackErr;
 
-    const audioUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/track_uploads/${fileName}`;
+    const trackUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/tracks/${trackName}`;
 
-    // Save track info
-    const { error: insertErr } = await supabase
-      .from("tracks")
-      .insert([{
+    // === Upload artwork (optional) ===
+    let artworkUrl =
+      "https://YOUR_SUPABASE_URL/storage/v1/object/public/artwork/default.png";
+
+    if (artworkFile) {
+      const artworkName = `${Date.now()}_${artworkFile.originalname}`;
+      const { error: artErr } = await supabase.storage
+        .from("artwork")
+        .upload(artworkName, artworkFile.buffer, {
+          contentType: artworkFile.mimetype,
+        });
+
+      if (!artErr) {
+        artworkUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/artwork/${artworkName}`;
+      }
+    }
+
+    // === Insert track record ===
+    const { error: insertErr } = await supabase.from("tracks").insert([
+      {
+        email,
         artist,
         title,
         genre,
-        track_url: audioUrl,
-        allow_download: allowDownload === "true",
-        play_count: 0,
-        average_rating: 0,
-        total_votes: 0
-      }]);
+        track_url: trackUrl,
+        artwork_url: artworkUrl,
+        allow_download: allow_download === "true",
+        approved: true,
+      },
+    ]);
 
     if (insertErr) throw insertErr;
 
-    // Mark token as used
+    // === Mark token as used ===
     await supabase
       .from("upload_tokens")
       .update({ used: true })
-      .eq("id", tokenRow.id);
+      .eq("email", email)
+      .eq("token", token);
 
-    res.json({ success: true, message: "✅ Track uploaded successfully" });
+    res.json({ success: true, message: "Track uploaded successfully!" });
   } catch (err) {
     console.error("Upload error:", err.message);
-    res.status(500).json({ success: false, error: "Upload failed: " + err.message });
+    res.status(500).json({ success: false, error: "Upload failed" });
   }
 });
 
