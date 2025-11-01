@@ -54,7 +54,7 @@ app.post("/api/check-email", async (req, res) => {
       return res.status(400).json({ success: false, message: "Email required" });
 
     const { data, error } = await supabase
-      .from("tokens")
+      .from("upload_tokens")
       .select("*")
       .eq("user_email", email)
       .eq("used", false)
@@ -84,7 +84,7 @@ app.post("/api/upload-track", upload.single("file"), async (req, res) => {
 
     // Verify token
     const { data: tokenData, error: tokenError } = await supabase
-      .from("tokens")
+      .from("upload_tokens")
       .select("*")
       .eq("user_email", email)
       .eq("token", token)
