@@ -1,40 +1,33 @@
 {
-  "name": "track-finder-charts",
-  "version": "6.0.0",
-  "description": "Backend API for Track Finder independent charts (uploads, trimming, votes, and email notifications).",
-  "type": "module",
+  "name": "track-finder-charts-backend",
+  "version": "5.0.0",
+  "description": "Track Finder Charts backend server for uploads, voting, and monthly winners.",
   "main": "server.js",
+  "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "test": "echo \"No test specified\" && exit 0"
+    "start": "node server.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.43.4",
+    "@supabase/supabase-js": "^2.43.5",
     "body-parser": "^1.20.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.21.1",
-    "ffmpeg-static": "^5.2.0",
-    "fluent-ffmpeg": "^2.1.3",
+    "express": "^4.19.2",
     "multer": "^1.4.5-lts.1",
-    "resend": "^3.2.0"
+    "resend": "^2.1.0"
   },
   "engines": {
-    "node": ">=20.x"
-  },
-  "author": "Jonathan Russell",
-  "license": "ISC",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/track-finder/track-finder-charts"
+    "node": ">=20.0.0"
   },
   "keywords": [
     "trackfinder",
     "charts",
     "music",
     "uploads",
-    "express",
+    "voting",
     "supabase",
-    "resend"
-  ]
+    "express"
+  ],
+  "author": "Jonathan Russell",
+  "license": "MIT"
 }
